@@ -27,6 +27,9 @@ func NewJWTManager(secret string, ttl time.Duration) *JWTManager {
 }
 
 func (m *JWTManager) Issue(userID int64) (string, error) {
+	if len(m.secret) < 32 || m.ttl <= 0 || userID <= 0 {
+		return "", ErrInvalidToken
+	}
 	now := m.now()
 	claims := Claims{
 		UserID: userID,
@@ -40,6 +43,9 @@ func (m *JWTManager) Issue(userID int64) (string, error) {
 }
 
 func (m *JWTManager) Verify(raw string) (int64, error) {
+	if len(m.secret) < 32 {
+		return 0, ErrInvalidToken
+	}
 	claims := new(Claims)
 	token, err := jwt.ParseWithClaims(
 		raw,

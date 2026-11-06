@@ -29,11 +29,11 @@ func NewUseCase(repository Repository, hasher PasswordHasher, tokens TokenIssuer
 
 func (uc *UseCase) Register(ctx context.Context, input RegisterInput) (User, error) {
 	email := strings.ToLower(strings.TrimSpace(input.Email))
-	password := strings.TrimSpace(input.Password)
+	password := input.Password
 	if !strings.Contains(email, "@") || strings.HasPrefix(email, "@") || strings.HasSuffix(email, "@") {
 		return User{}, ErrInvalidEmail
 	}
-	if len(password) < 8 {
+	if len(password) < 8 || len(password) > 72 {
 		return User{}, ErrWeakPassword
 	}
 
@@ -52,6 +52,9 @@ func (uc *UseCase) Register(ctx context.Context, input RegisterInput) (User, err
 }
 
 func (uc *UseCase) Login(ctx context.Context, input LoginInput) (LoginResult, error) {
+	if len(input.Password) < 8 || len(input.Password) > 72 {
+		return LoginResult{}, ErrInvalidCredentials
+	}
 	email := strings.ToLower(strings.TrimSpace(input.Email))
 	value, err := uc.repository.GetByEmail(ctx, email)
 	if err != nil {

@@ -1,97 +1,72 @@
-# Архитектура Notes API с authentication
+# Архитектура Task API после добавления security
 
-## Главная граница
+Сохраняется Handler → TaskUseCase interface → task.Repository interface,
+реализованный MemoryTaskRepository. DTO, Mapper, error mapping, DI и правила
+прошлого урока остаются на своих местах.
 
-```text
-HTTP boundary
-  Router / DTO / Handler / AuthMiddleware / request.Context
-                         │
-                         ▼
-Application
-  AuthUseCase / NoteUseCase / User / Note / errors / interfaces
-                         ▲
-                         │ implements
-Infrastructure
-  bcrypt / JWT / Memory repositories
-```
+## Новые зависимости
 
-Application-пакеты не импортируют `net/http`, JSON DTO или JWT. `main.go`
-знает concrete implementations, потому что его работа — собрать приложение.
+AuthHandler → user.UseCase через handler.AuthUseCase interface.
+user.UseCase → user.Repository + PasswordHasher + TokenIssuer.
+MemoryUserRepository, BcryptHasher и JWTManager реализуют нужные контракты.
+AuthMiddleware → TokenVerifier; тот же JWTManager реализует и Issue, и Verify.
 
-## Authentication
+`main` собирает оба Repository, оба UseCase, handlers, middleware и router.
+Ни UseCase, ни Repository не создают инфраструктуру самостоятельно.
 
-Authentication отвечает на вопрос «кто отправил запрос?».
+## Где заканчивается authentication
 
-```text
-Authorization header
-  → AuthMiddleware
-  → TokenVerifier.Verify
-  → userID
-  → request.Context
-```
+Middleware разбирает Bearer, вызывает Verify, кладёт положительный userID в
+request.Context через приватный ключ authctx. При ошибке формирует 401,
+WWW-Authenticate: Bearer и прекращает обработку. Следующий Handler читает
+identity через authctx.UserID и передаёт её явным аргументом UseCase.
 
-Middleware работает на HTTP boundary. При ошибке он возвращает `401` и не
-вызывает следующий Handler.
+Отмена/deadline request также сохраняются: везде передаётся r.Context().
+Context не становится контейнером всех зависимостей, в нём только identity
+конкретного запроса. Глобальный currentUserID или поле Handler недопустимы.
 
-## Authorization
-
-Ownership отвечает на вопрос «может ли этот пользователь работать с этой
-Note?». Ответ зависит от бизнес-данных, поэтому проверка находится в Note
-UseCase:
+## Где начинается authorization
 
 ```go
-value, err := uc.repository.Get(ctx, noteID)
-if err != nil {
-    return note.Note{}, err
-}
-if value.OwnerID != userID {
-    return note.Note{}, note.ErrForbidden
-}
+value, err := uc.repository.Get(ctx, taskID)
+if err != nil { return task.Task{}, err }
+if value.OwnerID != userID { return task.Task{}, task.ErrForbidden }
 ```
 
-HTTP Handler не принимает это решение. Он только переводит
-`note.ErrForbidden` в `403 Forbidden`.
+Эта проверка находится в TaskUseCase.Get; Update вызывает тот же Get до
+решения об изменении, Delete — до удаления. Проверка PATCH без известных полей
+по-прежнему возвращает ErrNoChanges без записи. Недопустимый вход не даёт
+доступа к данным. В HTTP известный ErrForbidden превращается в 403.
 
-## Consumer-owned interfaces
+Repository.Get загружает запись по ID, а business layer проверяет ownership.
+List/CountActive имеют ownerID в контракте хранения, чтобы возвращать и считать
+только собственные записи. Create получает доверенный ownerID от UseCase;
+он не берётся из input DTO. Update не меняет OwnerID.
 
-`user.UseCase` объявляет минимальные интерфейсы, которые ему нужны:
+## Сохранённые business rules и конкурентность
 
-```go
-type PasswordHasher interface {
-    Hash(password string) (string, error)
-    Compare(hash, password string) error
-}
+Trim/empty title/no changes, partial PATCH, запрет повторного завершения и
+лимит 20 активных Task не переносятся в middleware или Memory Repository.
+Лимит стал per-owner. Repository mutex защищает map; changeMu одного UseCase
+по-прежнему защищает CountActive → Create/Update для текущего процесса.
+MemoryUserRepository проверяет уникальный email под своим mutex.
 
-type TokenIssuer interface {
-    Issue(userID int64) (string, error)
-}
-```
+## Model не равна публичному JSON
 
-`httpapi/middleware` отдельно объявляет `TokenVerifier`. Один `JWTManager`
-реализует оба контракта неявно. UseCase не зависит от JWT, а middleware не
-зависит от login-сценария.
+Task получил OwnerID, но TaskResponse по-прежнему содержит id/title/done.
+User содержит PasswordHash, а UserResponse — только id/email. В JWT claims
+находятся user_id, iat и exp, не пароль/hash. Mapper задаёт эту границу явно.
 
-## Memory repositories
+## Замена persistence в 14
 
-`map` не поддерживает конкурентную запись из нескольких goroutines. HTTP
-server может выполнять запросы параллельно, поэтому repositories защищают
-состояние:
+| Сохраняется | Что заменяется |
+|---|---|
+| task.Repository и user.Repository | concrete memory implementations |
+| TaskUseCase/AuthUseCase и правила | выбор implementations в main |
+| Task/Auth DTO и Mapper | создание инфраструктурных зависимостей |
+| Handler, middleware, JWT verification | реализация операций хранения |
 
-- `Lock` для Create/Update/Delete;
-- `RLock` для Get/List;
-- копирование данных в новый slice перед возвратом списка.
-
-Mutex остаётся внутри repository implementation. UseCase не должен управлять
-им напрямую.
-
-## Что изменится при замене деталей
-
-| Изменение | Меняется | Обычно остаётся |
-|---|---|---|
-| JWT → opaque session token | `auth.JWTManager`, wiring | UseCase, Note ownership |
-| memory → PostgreSQL | repository implementations, wiring | HTTP contract, UseCase |
-| HTTP → gRPC | transport, DTO, auth interceptor | UseCase, Models, contracts |
-| bcrypt → другой password hasher | `PasswordHasher` implementation | AuthUseCase |
-
-Главное свойство архитектуры: детали можно заменить в composition root без
-переноса HTTP или JWT внутрь бизнес-логики.
+Контракты Repository используют context, Model/Input и application errors,
+без типов драйвера. Это граница замены. В этом classroom нет внешнего storage.
+Один процесс и один экземпляр UseCase — явно выбранный учебный runtime;
+межпроцессная атомарность составных операций относится к теме persistence.

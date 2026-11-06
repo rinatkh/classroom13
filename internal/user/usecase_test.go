@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,39 @@ func TestLoginHidesMissingUser(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestPasswordIsNotTrimmed(t *testing.T) {
+	repo := &fakeRepository{}
+	uc := NewUseCase(repo, fakeHasher{}, fakeTokens{})
+	_, err := uc.Register(context.Background(), RegisterInput{Email: "alice@example.com", Password: "  secret123  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.created.PasswordHash != "hash:  secret123  " {
+		t.Fatalf("hash=%q", repo.created.PasswordHash)
+	}
+	if _, err := uc.Login(context.Background(), LoginInput{Email: "ALICE@example.com", Password: "  secret123  "}); err != nil {
+		t.Fatalf("login=%v", err)
+	}
+	if _, err := uc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "secret123"}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("trimmed login=%v", err)
+	}
+}
+
+func TestRegisterRejectsInvalidInput(t *testing.T) {
+	for _, tt := range []struct {
+		email, password string
+		want            error
+	}{
+		{"missing-at", "secret123", ErrInvalidEmail},
+		{"alice@example.com", "short", ErrWeakPassword},
+		{"alice@example.com", strings.Repeat("x", 73), ErrWeakPassword},
+	} {
+		_, err := NewUseCase(&fakeRepository{}, fakeHasher{}, fakeTokens{}).Register(context.Background(), RegisterInput{Email: tt.email, Password: tt.password})
+		if !errors.Is(err, tt.want) {
+			t.Fatalf("register=%v want=%v", err, tt.want)
+		}
 	}
 }

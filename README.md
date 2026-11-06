@@ -1,207 +1,153 @@
-# Classroom 13 — Authentication, Authorization и Middleware
+# Classroom 13 — identity и security для того же Task API
 
-Мы продолжаем архитектурно разделённый Notes API из прошлого занятия.
-Новые обязанности добавляются в подходящие слои: HTTP middleware определяет
-пользователя, context переносит identity внутри запроса, а UseCase проверяет
-право работать с конкретной заметкой.
+**Начальное состояние — финальный Classroom 12.** Сохраняем его Task, UseCase,
+Repository interface, Memory Repository, DTO/Mapper, handlers, errors, тесты,
+curl demo и шесть endpoints. В classroom12 ещё нет пользователей и auth.
+Для сравнения открываем его настоящий каталог, а здесь работаем с одной версией.
 
-## Точка старта и результат
+В корне добавляем User, Register/Login, bcrypt, JWT, authentication middleware,
+request context и ownership к этому же Task API. Архитектура прошлого урока
+сохраняется; новая предметная модель вместо Task не создаётся.
 
-Рабочая версия **до authentication** находится в `before/`:
+## Быстрый старт
 
-```text
-Client → Handler → Note UseCase → Memory Note Repository
-```
-
-Итог classroom:
-
-```text
-POST /register ─┐
-POST /login    ─┴→ AuthHandler → AuthUseCase → UserRepository
-                                      │
-                                      ├→ PasswordHasher (bcrypt)
-                                      └→ TokenIssuer (JWT)
-
-Protected request → AuthMiddleware → request.Context(userID)
-                                      ↓
-                           NoteHandler → Note UseCase
-                                            ↓ ownership
-                                  Memory Note Repository
-```
-
-JWT, bcrypt и HTTP остаются деталями внешних слоёв. Пакеты `user` и `note`
-не импортируют `net/http` или JWT-библиотеку.
-
-## API
-
-Public endpoints:
-
-| Method | Path | Успех | Назначение |
-|---|---|---:|---|
-| `GET` | `/health` | `200` | health check |
-| `POST` | `/register` | `201` | регистрация пользователя |
-| `POST` | `/login` | `200` | получение Bearer token |
-
-Protected endpoints:
-
-| Method | Path | Успех | Назначение |
-|---|---|---:|---|
-| `POST` | `/notes` | `201` | создать свою заметку |
-| `GET` | `/notes` | `200` | получить только свои заметки |
-| `GET` | `/notes/{id}` | `200` | получить свою заметку |
-| `PUT` | `/notes/{id}` | `200` | заменить свою заметку |
-| `DELETE` | `/notes/{id}` | `204` | удалить свою заметку |
-
-Protected request содержит header:
-
-```http
-Authorization: Bearer <token>
-```
-
-## Status codes
-
-| Ситуация | Status |
-|---|---:|
-| malformed JSON, неверный ID, пустой title | `400 Bad Request` |
-| неправильный password, token отсутствует/повреждён/истёк | `401 Unauthorized` |
-| пользователь известен, но Note принадлежит другому | `403 Forbidden` |
-| Note не существует | `404 Not Found` |
-| email уже зарегистрирован | `409 Conflict` |
-| неожиданная внутренняя ошибка | `500 Internal Server Error` |
-
-`401 Unauthorized` исторически называется немного странно: в этом API он
-означает проблему authentication. `403 Forbidden` означает, что identity уже
-известна, но действие запрещено.
-
-## Структура
-
-```text
-classroom/
-├── before/                         layered Notes API без auth
-├── cmd/api/main.go                 composition root
-├── internal/
-│   ├── user/                       User, AuthUseCase и contracts
-│   ├── note/                       Note UseCase и ownership rules
-│   ├── auth/                       bcrypt и JWT implementations
-│   ├── repository/memory/          map + sync.RWMutex
-│   └── httpapi/
-│       ├── authctx/                request-scoped userID
-│       ├── dto/                    JSON request/response types
-│       ├── mapper/                 Model → response DTO
-│       ├── handler/                HTTP lifecycle
-│       ├── middleware/             Bearer authentication
-│       └── router.go               public/protected routes
-├── docs/
-│   ├── live-coding-script.md
-│   ├── architecture.md
-│   ├── interview.md
-│   ├── bad-examples.md
-│   └── security-notes.md
-├── scripts/curl-demo.sh
-└── Makefile
-```
-
-## Запуск
-
-Нужен Go 1.22+. PostgreSQL, Docker и migrations не нужны.
+Нужен Go 1.22+, curl и Python 3 для curl demo. Для нового учебного прогона
+создайте свежий ключ и запустите API:
 
 ```bash
+export JWT_SECRET="$(openssl rand -hex 32)"
 make run
-```
-
-`Makefile` передаёт локальный учебный secret. Для собственного запуска:
-
-```bash
-JWT_SECRET='replace-me' TOKEN_TTL='2h' go run ./cmd/api
-```
-
-Во втором терминале:
-
-```bash
+# Во втором терминале из classroom13:
 make curl-demo
 ```
 
-## Ручной сценарий
+JWT_SECRET обязателен, минимум 32 байта; Makefile не подставляет общий ключ.
+TOKEN_TTL по умолчанию 2h, HTTP_ADDR — :8080. В .env.example перечислены
+переменные для справки, файл не загружается автоматически.
 
-Регистрация:
+Для показа старого поведения из корня classroom13 выполните
+`make -C "../../12 Занятие/classroom12" run`: GET /tasks без token вернёт 200.
+Остановите API занятия 12 перед запуском classroom13 на том же порту.
+После добавления security тот же запрос без token вернёт 401.
 
-```bash
-curl -i -X POST http://localhost:8080/register \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"alice@example.com","password":"secret123"}'
-```
+Данные обоих Memory Repositories исчезают после перезапуска. Начинайте новый
+учебный прогон со свежим JWT_SECRET, затем снова register/login: ключи JWT
+и временные user ID не должны переживать разные наборы memory-данных.
 
-Login:
+## Прежние маршруты получили security
 
-```bash
-curl -i -X POST http://localhost:8080/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"alice@example.com","password":"secret123"}'
-```
+| Endpoint | Доступ | Успех |
+|---|---|---:|
+| GET /health | public, прежний JSON {"status":"ok"} | 200 |
+| POST /register | public | 201, User DTO id/email |
+| POST /login | public | 200, {"token":"..."} |
+| GET /tasks | authenticated user | 200, только свои Task |
+| GET /tasks/{id} | owner | 200 |
+| POST /tasks | authenticated user | 201 + Location |
+| PATCH /tasks/{id} | owner | 200 |
+| DELETE /tasks/{id} | owner | 204, пустой body |
 
-Создание заметки:
-
-```bash
-curl -i -X POST http://localhost:8080/notes \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"title":"Auth","text":"Middleware before Handler"}'
-```
-
-## Request lifecycle
-
-Для `GET /notes/1`:
-
-1. Router выбирает protected route.
-2. AuthMiddleware читает `Authorization`.
-3. JWTManager проверяет подпись и `exp`.
-4. Middleware кладёт `userID` в новый request context.
-5. Handler получает `userID` через `authctx.UserID`.
-6. Note UseCase загружает Note и проверяет `OwnerID == userID`.
-7. Handler переводит результат в HTTP status и JSON.
-
-Если middleware вернул `401`, Handler не вызывается. Если token корректен, но
-Note чужая, UseCase возвращает `note.ErrForbidden`, а Handler переводит её в
-`403`.
-
-## Тесты
+Task JSON по-прежнему содержит **id/title/done**. OwnerID и внутренние даты
+остаются в Model, Mapper их не публикует. OwnerID отсутствует во входном DTO:
+пользователь не может назначить владельца через JSON. PATCH остаётся частичным;
+указатели сохраняют различие «не прислали done» и «прислали false».
 
 ```bash
-make test
-make test-unit
-make test-race
-make vet
-make ci
-make check-before
+curl -i http://localhost:8080/tasks \
+  -H 'Authorization: Bearer YOUR_TOKEN'
 ```
 
-- AuthUseCase tests используют fake Repository, fake Hasher и fake TokenIssuer.
-- Note UseCase tests проверяют ownership без HTTP и JWT.
-- Middleware tests используют fake TokenVerifier.
-- Router test выполняет register → login → protected request → forbidden.
-- Memory Repository test запускает конкурентные записи; `-race` не должен
-  находить гонки.
+| Ситуация | Status |
+|---|---:|
+| нет Bearer token или он не прошёл Verify | 401 + WWW-Authenticate: Bearer |
+| token валиден, существующая Task принадлежит другому | 403 |
+| Task не существует | 404 |
+| неправильный JSON/ID, пустой title, PATCH без изменений | 400 |
+| повторное завершение, лимит активных задач | 409 |
+| email уже зарегистрирован | 409 |
+| credentials для login неверны | 401 |
+| непредвиденная ошибка | 500, нейтральное сообщение |
 
-## Live coding
+Все правила занятия 12 сохранены. Лимит 20 активных Task теперь считается
+**для текущего владельца**; задачи Alice не расходуют лимит Bob. Новые 401/403
+— осознанное изменение доступа, а не смена HTTP-домена или PATCH на PUT.
 
-Откройте `docs/live-coding-script.md`. Основной путь:
+## Authentication и authorization — разные проверки
+
+Authentication на HTTP boundary:
 
 ```text
-User → Register → Login → Token → Middleware → Context
-→ protected routes → OwnerID → ownership → tests
+Authorization: Bearer token → AuthMiddleware → JWT Verify
+→ userID → request.Context → знакомый TaskHandler
 ```
 
-## Частые ошибки
+Middleware проверяет подпись, exp, разрешённый алгоритм HS256 и identity,
+возвращает 401 при ошибке и не вызывает next. Он не загружает Task.
 
-- пароль сохраняется в `User.PasswordHash` без hashing;
-- `PasswordHash` попадает в response DTO или token payload;
-- token проверяется заново в каждом Handler;
-- middleware вызывает `next` даже после `401`;
-- context key — обычная строка;
-- middleware пытается проверять ownership без загрузки Note;
-- UseCase возвращает `http.StatusForbidden`;
-- Handler сравнивает `note.OwnerID` сам;
-- memory repository пишет в map без mutex;
-- JWT secret захардкожен в production-коде.
+Authorization в приложении:
 
-Разбор находится в `docs/bad-examples.md` и `docs/security-notes.md`.
+```text
+TaskHandler получает userID → TaskUseCase.Get/Update/Delete
+→ Repository.Get(taskID) → Task.OwnerID == userID? → разрешить / ErrForbidden
+```
+
+Handler передаёт userID явным аргументом, не сравнивает владельцев сам.
+UseCase не извлекает identity из HTTP context и не импортирует JWT.
+
+## Что осталось от архитектуры 12
+
+| Пакет | Ответственность |
+|---|---|
+| internal/task | Task, UseCase, Repository interface, business rules/errors |
+| internal/repository/memory/task.go | прежняя map/RWMutex/nextID, добавлен owner scope |
+| internal/httpapi/dto/task.go | прежние request/response DTO |
+| internal/httpapi/mapper/task.go | прежний Model → DTO |
+| internal/httpapi/handler/task.go | прежние HTTP-обязанности + передача userID |
+| internal/user | User, Repository, AuthUseCase, PasswordHasher/TokenIssuer contracts |
+| internal/auth | BcryptHasher и JWTManager implementations |
+| internal/httpapi/authctx | приватный тип ключа identity в context |
+| internal/httpapi/middleware | TokenVerifier contract и RequireUser |
+| cmd/api/main.go | расширенный composition root |
+
+Регистрация нормализует email, проверяет вход, хеширует пароль и сохраняет
+только PasswordHash. Пароль не обрезается через TrimSpace: пробелы являются
+его частью. Учебное ограничение пароля — 8–72 байта. Login сравнивает hash и
+выдаёт token; неизвестный email и неверный пароль дают ErrInvalidCredentials.
+MemoryUserRepository также обеспечивает уникальность email под mutex.
+
+## Проверки
+
+```bash
+make ci
+# отдельно:
+go test ./...
+go vet ./...
+go test -race ./...
+```
+
+`make ci` проверяет единственный модуль classroom13. Сохранены business tests из 12,
+его lifecycle/contract tests выполняются с authenticated owner fixture.
+Добавлены ownership, per-user limit, JWT/signature/expiration/algorithm,
+реальный bcrypt, middleware/context, конкурентный duplicate email и полный
+register/login → Task → Bob forbidden сценарий. Fake Repository/Hasher/Issuer/
+Verifier сохраняют unit-testing подход.
+
+`make curl-demo` показывает 401, register/login Alice и Bob, создание Task,
+403 для чтения/изменения/удаления чужой Task, изолированные списки, частичный
+PATCH, повторное завершение 409, done:false, DELETE 204 и GET 404. Имена email
+и полученный ID выбираются динамически, поэтому демо можно повторять.
+
+Сценарий занятия: [live coding](docs/live-coding-script.md).
+Границы: [architecture](docs/architecture.md).
+Доказательство перехода: [continuity](docs/continuity.md).
+О JWT-модели этого урока: [security notes](docs/security-notes.md).
+
+Теперь архитектура и security готовы, но persistence всё ещё временный.
+На занятии 14 заменим Memory Repository на PostgreSQL через прежние interfaces
+и wiring, сохраняя HTTP/business layers. В этом занятии базы и SQL нет.
+
+## Логи
+
+[Уровни DEBUG / INFO / ERROR / FATAL, LOG_LEVEL и безопасные поля](docs/logging.md).
+
+`LOG_LEVEL=DEBUG make run` включает диагностику; обычный запуск использует INFO.

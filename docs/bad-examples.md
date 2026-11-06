@@ -1,95 +1,61 @@
-# Архитектурные ошибки
+# Антипримеры security поверх Task API
 
-## Token parsing в каждом Handler
+## Заменить архитектуру новым похожим приложением
 
-```go
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-    raw := r.Header.Get("Authorization")
-    userID, _ := h.tokens.Verify(raw)
-    // ...
-}
-```
+Если после auth исчезли TaskUseCase, DTO/Mapper или частичный PATCH, это уже
+другой проект. Начинаем с финального classroom12, а новые user/auth/middleware добавляем к нему.
 
-Логика дублируется и легко расходится между endpoints. Общая authentication-
-проверка относится к middleware.
-
-## Middleware продолжает цепочку после 401
+## Сохранить пароль под именем PasswordHash
 
 ```go
-if err != nil {
-    http.Error(w, "unauthorized", http.StatusUnauthorized)
-}
-next.ServeHTTP(w, r)
+User{PasswordHash: input.Password}
 ```
 
-Нужен `return`. Иначе protected Handler всё равно выполнится и попробует
-записать второй response.
+Название поля не хеширует значение. Register обязан вызвать PasswordHasher.Hash.
+Login использует Compare, а не сравнение двух bcrypt hashes: соль разная.
 
-## Ownership внутри middleware
+## Обрезать пароль только при регистрации
 
-```go
-func Auth(next http.Handler) http.Handler {
-    // middleware загружает Note и сравнивает OwnerID
-}
-```
+TrimSpace(password) меняет credential; тот же ввод больше не проходит login.
+Нормализуем email, но пароль хешируем/сравниваем в исходном виде.
 
-Обычный AuthMiddleware не знает, какой ресурс и какое бизнес-правило применяет
-конкретный endpoint. Он устанавливает identity. Ownership проверяет UseCase,
-который работает с Note.
+## Доверять payload без Verify
 
-## HTTP status внутри UseCase
+Decode JWT не подтверждает подпись или срок. RequireUser вызывает Verify,
+проверяет ошибку и прерывает запрос. Алгоритм разрешён явно, exp обязателен.
 
-```go
-func (uc *UseCase) Delete(...) (int, error) {
-    return http.StatusForbidden, note.ErrForbidden
-}
-```
+## Продолжить после 401
 
-UseCase начинает зависеть от HTTP. Правильнее вернуть application error, а
-transport решит, каким status представить его клиенту.
+Отсутствующий return позволяет вызвать next после отказа. Middleware tests
+должны подтвердить и status, и то, что следующий Handler не вызывался.
 
-## Password в plaintext
+## Общий currentUserID
 
-```go
-repository.Create(user.User{PasswordHash: request.Password})
-```
+Identity в глобальной переменной или поле Handler смешивает конкурентные
+requests. Храним её в request.Context через приватный ключ.
 
-Название поля не делает значение hash. AuthUseCase сначала вызывает
-`PasswordHasher.Hash`, и только результат передаёт repository.
+## Проверять ownership в middleware
 
-## PasswordHash в DTO
+Middleware знает token, но не business Task. TaskUseCase загружает Task и
+сравнивает OwnerID; Handler только сопоставляет ErrForbidden с 403.
 
-```go
-type UserResponse struct {
-    PasswordHash string `json:"password_hash"`
-}
-```
+## Принимать owner_id из JSON
 
-Hash не является публичным API contract. Response mapper выбирает только ID и
-email.
+Клиент сможет назначить чужого владельца. У CreateTaskRequest только title,
+а OwnerID берётся из проверенной identity. Неизвестное поле JSON отклоняется.
 
-## Строковый context key
+## Потерять правила прошлого урока
 
-```go
-context.WithValue(ctx, "userID", userID)
-```
+Подмена UpdateInput на обычный bool ломает PATCH false/nil. Отсутствие лимита
+или повторного завершения меняет бизнес-поведение. Сохраняем прежние тесты и
+добавляем identity в их fixture вместо удаления проверок.
 
-Другой пакет может использовать тот же ключ. Private key type устраняет
-коллизию.
+## Отдавать все записи после login
 
-## Map без mutex
+Authentication ещё не означает доступ ко всему списку. List и CountActive
+ограничены owner; Get/Update/Delete проверяют конкретную запись.
 
-```go
-func (r *Repository) Create(value Note) {
-    r.items[value.ID] = value
-}
-```
+## Создать пользователей без атомарной уникальности
 
-Несколько HTTP requests могут записывать одновременно. Repository использует
-`sync.RWMutex`; race detector проверяет это решение.
-
-## Interface ради названия слоя
-
-Не нужен один огромный `AuthServiceInterface`, который содержит register,
-login, JWT, password hashing и HTTP helpers. Интерфейс вводится у потребителя и
-описывает только реально нужное поведение.
+Проверка GetByEmail → Create сама по себе допускает гонку. MemoryUserRepository
+повторно проверяет email под Lock; business precheck остаётся удобной ранней проверкой.

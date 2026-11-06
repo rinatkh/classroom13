@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,20 +16,20 @@ import (
 	"github.com/rinatkh/classroom13/internal/httpapi"
 	"github.com/rinatkh/classroom13/internal/httpapi/handler"
 	"github.com/rinatkh/classroom13/internal/httpapi/middleware"
-	"github.com/rinatkh/classroom13/internal/note"
 	"github.com/rinatkh/classroom13/internal/repository/memory"
+	"github.com/rinatkh/classroom13/internal/task"
 	"github.com/rinatkh/classroom13/internal/user"
 )
 
 func newRouter() http.Handler {
 	users := memory.NewUserRepository()
-	notes := memory.NewNoteRepository()
-	tokens := auth.NewJWTManager("test-secret", time.Hour)
+	tasks := memory.NewTaskRepository()
+	tokens := auth.NewJWTManager("0123456789abcdef0123456789abcdef", time.Hour)
 	authUseCase := user.NewUseCase(users, auth.NewBcryptHasher(bcrypt.MinCost), tokens)
-	noteUseCase := note.NewUseCase(notes)
+	taskUseCase := task.NewUseCase(tasks)
 	return httpapi.NewRouter(
 		handler.NewAuthHandler(authUseCase),
-		handler.NewNoteHandler(noteUseCase),
+		handler.NewTaskHandler(taskUseCase),
 		middleware.NewAuth(tokens),
 	)
 }
@@ -36,39 +37,91 @@ func newRouter() http.Handler {
 func TestProtectedRoutesAndOwnership(t *testing.T) {
 	router := newRouter()
 
-	withoutToken := request(t, router, http.MethodGet, "/notes", "", "")
+	withoutToken := request(t, router, http.MethodGet, "/tasks", "", "")
 	assertStatus(t, withoutToken, http.StatusUnauthorized)
 
 	alice := registerAndLogin(t, router, "alice@example.com")
 	bob := registerAndLogin(t, router, "bob@example.com")
 
-	created := request(t, router, http.MethodPost, "/notes", alice, `{"title":"private","text":"Alice only"}`)
+	created := request(t, router, http.MethodPost, "/tasks", alice, `{"title":"private"}`)
 	assertStatus(t, created, http.StatusCreated)
-	if got := created.Header().Get("Location"); got != "/notes/1" {
+	if got := created.Header().Get("Location"); got != "/tasks/1" {
 		t.Fatalf("Location = %q", got)
 	}
 
-	foreign := request(t, router, http.MethodGet, "/notes/1", bob, "")
+	foreign := request(t, router, http.MethodGet, "/tasks/1", bob, "")
 	assertStatus(t, foreign, http.StatusForbidden)
+	for _, method := range []string{http.MethodPatch, http.MethodDelete} {
+		denied := request(t, router, method, "/tasks/1", bob, `{"done":true}`)
+		assertStatus(t, denied, http.StatusForbidden)
+	}
+	own := request(t, router, http.MethodGet, "/tasks/1", alice, "")
+	assertStatus(t, own, http.StatusOK)
+	patched := request(t, router, http.MethodPatch, "/tasks/1", alice, `{"done":true}`)
+	assertStatus(t, patched, http.StatusOK)
+	var changed struct {
+		Title string
+		Done  bool
+	}
+	if err := json.Unmarshal(patched.Body.Bytes(), &changed); err != nil || changed.Title != "private" || !changed.Done {
+		t.Fatalf("PATCH=%s, %v", patched.Body.String(), err)
+	}
 
-	aliceList := request(t, router, http.MethodGet, "/notes", alice, "")
+	aliceList := request(t, router, http.MethodGet, "/tasks", alice, "")
 	assertStatus(t, aliceList, http.StatusOK)
-	var aliceNotes []map[string]any
-	if err := json.Unmarshal(aliceList.Body.Bytes(), &aliceNotes); err != nil {
+	var aliceTasks []map[string]any
+	if err := json.Unmarshal(aliceList.Body.Bytes(), &aliceTasks); err != nil {
 		t.Fatalf("decode Alice list: %v", err)
 	}
-	if len(aliceNotes) != 1 {
-		t.Fatalf("Alice list length = %d", len(aliceNotes))
+	if len(aliceTasks) != 1 {
+		t.Fatalf("Alice list length = %d", len(aliceTasks))
 	}
 
-	bobList := request(t, router, http.MethodGet, "/notes", bob, "")
+	bobList := request(t, router, http.MethodGet, "/tasks", bob, "")
 	assertStatus(t, bobList, http.StatusOK)
-	var bobNotes []map[string]any
-	if err := json.Unmarshal(bobList.Body.Bytes(), &bobNotes); err != nil {
+	var bobTasks []map[string]any
+	if err := json.Unmarshal(bobList.Body.Bytes(), &bobTasks); err != nil {
 		t.Fatalf("decode Bob list: %v", err)
 	}
-	if len(bobNotes) != 0 {
-		t.Fatalf("Bob can see foreign notes: %s", bobList.Body.String())
+	if len(bobTasks) != 0 {
+		t.Fatalf("Bob can see foreign tasks: %s", bobList.Body.String())
+	}
+}
+
+func TestAllTaskRoutesRequireAuthentication(t *testing.T) {
+	router := newRouter()
+	for _, tc := range []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/tasks", ""},
+		{http.MethodGet, "/tasks/1", ""},
+		{http.MethodPost, "/tasks", `{"title":"private"}`},
+		{http.MethodPatch, "/tasks/1", `{"done":true}`},
+		{http.MethodDelete, "/tasks/1", ""},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			response := request(t, router, tc.method, tc.path, "", tc.body)
+			assertStatus(t, response, http.StatusUnauthorized)
+			if response.Header().Get("WWW-Authenticate") != "Bearer" {
+				t.Fatal("missing Bearer challenge")
+			}
+		})
+	}
+}
+
+// Task API сохраняет PATCH; старые маршруты Notes не должны случайно остаться
+// вторым API рядом с ним после применения очередного патча.
+func TestTaskRoutesPreserveDomainAndPatch(t *testing.T) {
+	router := newRouter()
+	for _, path := range []string{"/notes", "/notes/1"} {
+		t.Run(path, func(t *testing.T) {
+			assertStatus(t, request(t, router, http.MethodGet, path, "", ""), http.StatusNotFound)
+		})
+	}
+	response := request(t, router, http.MethodPut, "/tasks/1", "", `{"done":true}`)
+	assertStatus(t, response, http.StatusMethodNotAllowed)
+	if allow := response.Header().Get("Allow"); !strings.Contains(allow, "PATCH") || strings.Contains(allow, "PUT") {
+		t.Fatalf("Allow=%q", allow)
 	}
 }
 

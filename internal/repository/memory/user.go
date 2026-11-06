@@ -1,10 +1,11 @@
 // Package memory содержит потокобезопасные in-memory реализации repository.
 // Это infrastructure detail: usecase видит только интерфейсы user.Repository
-// и note.Repository.
+// и task.Repository.
 package memory
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -21,7 +22,11 @@ func NewUserRepository() *UserRepository {
 	return &UserRepository{nextID: 1, byEmail: make(map[string]user.User)}
 }
 
-func (r *UserRepository) Create(_ context.Context, value user.User) (user.User, error) {
+func (r *UserRepository) Create(ctx context.Context, value user.User) (user.User, error) {
+	slog.DebugContext(ctx, "repository operation", "adapter", "memory", "repository", "UserRepository", "operation", "Create")
+	if err := ctx.Err(); err != nil {
+		return user.User{}, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -35,7 +40,11 @@ func (r *UserRepository) Create(_ context.Context, value user.User) (user.User, 
 	return value, nil
 }
 
-func (r *UserRepository) GetByEmail(_ context.Context, email string) (user.User, error) {
+func (r *UserRepository) GetByEmail(ctx context.Context, email string) (user.User, error) {
+	slog.DebugContext(ctx, "repository operation", "adapter", "memory", "repository", "UserRepository", "operation", "GetByEmail")
+	if err := ctx.Err(); err != nil {
+		return user.User{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -45,3 +54,5 @@ func (r *UserRepository) GetByEmail(_ context.Context, email string) (user.User,
 	}
 	return value, nil
 }
+
+var _ user.Repository = (*UserRepository)(nil)

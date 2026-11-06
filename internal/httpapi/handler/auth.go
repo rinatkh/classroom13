@@ -3,11 +3,12 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/rinatkh/classroom13/internal/httpapi/dto"
 	"github.com/rinatkh/classroom13/internal/httpapi/mapper"
+	"github.com/rinatkh/classroom13/internal/logging"
 	"github.com/rinatkh/classroom13/internal/user"
 )
 
@@ -25,6 +26,7 @@ func NewAuthHandler(useCase AuthUseCase) *AuthHandler {
 }
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
+	slog.DebugContext(r.Context(), "HTTP request", "operation", "auth.register")
 	var request dto.RegisterRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -42,15 +44,17 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	case err != nil:
+		logging.Error(r.Context(), "auth operation failed", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
-	w.Header().Set("Location", fmt.Sprintf("/users/%d", result.ID))
+	slog.InfoContext(r.Context(), "user registered", "user_id", result.ID)
 	writeJSON(w, http.StatusCreated, mapper.UserToResponse(result))
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	slog.DebugContext(r.Context(), "HTTP request", "operation", "auth.login")
 	var request dto.LoginRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -65,8 +69,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		logging.Error(r.Context(), "auth operation failed", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	slog.InfoContext(r.Context(), "auth credentials issued")
 	writeJSON(w, http.StatusOK, dto.TokenResponse{Token: result.Token})
 }

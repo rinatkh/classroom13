@@ -1,39 +1,36 @@
+SHELL := /bin/bash
 GO ?= go
-HTTP_ADDR ?= :8080
-JWT_SECRET ?= classroom-secret-change-me
-TOKEN_TTL ?= 2h
 BASE_URL ?= http://localhost:8080
+HTTP_ADDR ?= :8080
+TOKEN_TTL ?= 2h
+export BASE_URL HTTP_ADDR TOKEN_TTL JWT_SECRET
 
-.PHONY: run test test-unit test-race fmt fmt-check vet deps ci curl-demo check-before
-
+.PHONY: help run build test test-unit test-race fmt fmt-check vet deps ci curl-demo clean
+help:
+	@echo "Task API: make run / make curl-demo / make ci"
+	@echo "Исходный API: classroom12 из предыдущего занятия"
 run:
-	HTTP_ADDR='$(HTTP_ADDR)' JWT_SECRET='$(JWT_SECRET)' TOKEN_TTL='$(TOKEN_TTL)' $(GO) run ./cmd/api
-
+	$(GO) run ./cmd/api
+build:
+	@mkdir -p bin
+	$(GO) build -buildvcs=false -o bin/task-api ./cmd/api
 test:
 	$(GO) test ./...
-
 test-unit:
-	$(GO) test ./internal/user ./internal/note ./internal/auth ./internal/httpapi/...
-
+	$(GO) test ./internal/...
 test-race:
 	$(GO) test -race ./...
-
 fmt:
-	gofmt -w $$(find . -type f -name '*.go' -not -path './before/*')
-
+	gofmt -w $$(find . -type f -name '*.go' -not -path './bin/*')
 fmt-check:
-	@test -z "$$(gofmt -l $$(find . -type f -name '*.go' -not -path './before/*'))" || (gofmt -l $$(find . -type f -name '*.go' -not -path './before/*'); exit 1)
-
+	@files="$$(gofmt -l $$(find . -type f -name '*.go' -not -path './bin/*'))"; \
+	if [ -n "$$files" ]; then echo "$$files"; exit 1; fi
 vet:
 	$(GO) vet ./...
-
 deps:
-	$(GO) list -deps ./... >/dev/null
-
-ci: fmt-check vet deps test test-race
-
+	$(GO) list -buildvcs=false -deps ./... >/dev/null
+ci: fmt-check vet deps test test-race build
 curl-demo:
-	BASE_URL='$(BASE_URL)' ./scripts/curl-demo.sh
-
-check-before:
-	cd before && $(GO) test ./...
+	bash ./scripts/curl-demo.sh
+clean:
+	rm -f bin/task-api coverage.out

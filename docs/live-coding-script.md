@@ -1,519 +1,136 @@
-# Live coding: добавляем auth в существующий Notes API
+# Live coding 13 — добавляем security к финалу Task API 12
 
-Ориентир — 45–55 минут практики. Исходное состояние находится в `before/`, а
-готовый код — в корне classroom. Не переписывайте всё сразу: после каждого шага
-фиксируйте новую ответственность и запускайте узкую проверку.
+Исходник — финальный classroom12, архитектурный Task API предыдущего урока.
+Ориентир 90 минут: не переписывайте DTO/Mapper/UseCase заново, расширяйте их.
 
-## Подготовка — 3 минуты
-
-### Что открыть
-
-- `before/internal/note/note.go`;
-- `before/internal/httpapi/router.go`;
-- финальную схему в `docs/architecture.md`.
-
-### Что спросить
-
-«Кто сейчас может вызвать `GET /notes`?»
-
-### Ожидаемый ответ
-
-Любой клиент. В системе нет пользователя, credentials или ownership.
-
-### Команда
+## STEP 0. Проверяем прежний Task API
 
 ```bash
-make check-before
-cd before && go run ./cmd/api
+make -C "../../12 Занятие/classroom12" run
+# второй терминал:
+curl -i http://localhost:8080/health
+curl -i http://localhost:8080/tasks
 ```
 
-Во втором терминале:
+Ожидаем 200 без token. Откройте classroom12/internal/task/usecase.go,
+classroom12/internal/httpapi/handler/task.go, classroom12/internal/repository/memory/task.go.
+Спросите: «Кто сейчас может читать Task? Где остаются business rules?»
+Ответ: любой клиент; правила уже в UseCase. Перед финальным запуском остановите API занятия 12.
 
-```bash
-curl -i http://localhost:8080/notes
-```
+## STEP 1. User и MemoryUserRepository
 
-### Expected result
+Добавьте internal/user/model.go, repository.go, errors.go и memory/user.go.
+Сохраняем только PasswordHash, не plaintext. Покажите map, RWMutex, nextID
+и уникальность email в Create под lock, чтобы два register не создали дубликат.
 
-`200 OK` без token. Подчеркните: архитектура уже разделена, но security
-responsibilities пока отсутствуют.
+## STEP 2. PasswordHasher и Register
 
----
-
-## STEP 1. User model и Repository — 5 минут
-
-### Что открыть
-
-- `internal/user/model.go`;
-- `internal/user/repository.go`;
-- `internal/repository/memory/user.go`.
-
-### Что спросить
-
-«Почему `Password` из request не должен становиться полем сохранённого User?»
-
-### Ожидаемый ответ
-
-Repository хранит только hash. Plaintext password нужен на короткое время во
-входе Register/Login.
-
-### Что написать
-
-1. `User` с `ID`, `Email`, `PasswordHash`.
-2. `RegisterInput` и `LoginInput`.
-3. `Repository` с `Create` и `GetByEmail`.
-4. `MemoryUserRepository` с `map[string]user.User` и `sync.RWMutex`.
-
-### Что временно сломано
-
-Пока нет AuthUseCase, поэтому User создать через HTTP нельзя. Это нормально:
-мы сначала формируем внутренний contract.
-
-### Команда
-
-```bash
-go test ./internal/repository/memory
-```
-
-### Expected result
-
-Package компилируется. Memory implementation знает `map` и mutex, package
-`user` — нет.
-
-### Связь со следующим шагом
-
-Теперь UseCase сможет попросить Repository сохранить пользователя, но сначала
-нужно определить, как хешировать password.
-
----
-
-## STEP 2. PasswordHasher и Register — 6 минут
-
-### Что открыть
-
-- `internal/user/usecase.go`;
-- `internal/auth/password.go`;
-- `internal/user/usecase_test.go`.
-
-### Что спросить
-
-«Почему AuthUseCase принимает `PasswordHasher`, а не вызывает bcrypt напрямую?»
-
-### Ожидаемый ответ
-
-UseCase зависит от нужного поведения. bcrypt — заменяемая implementation и не
-нужен в unit test.
-
-### Что написать
-
-```go
-type PasswordHasher interface {
-    Hash(password string) (string, error)
-    Compare(hash, password string) error
-}
-```
-
-Затем `Register`:
-
-1. normalize email;
-2. проверить email/password;
-3. убедиться, что email свободен;
-4. вызвать `Hash`;
-5. сохранить только `PasswordHash`.
-
-### Classroom moment
-
-Временно запишите:
-
-```go
-PasswordHash: input.Password
-```
-
-Спросите, изменилось ли значение только из-за имени поля. Сразу замените на
-результат `hasher.Hash`.
-
-### Команда
+В user/usecase.go задайте интерфейс Hash/Compare, в auth/password.go — bcrypt.
+Register нормализует email, проверяет длину пароля, вызывает Hash и Repository.
+Пароль нельзя TrimSpace: вход и хешируемое значение должны совпадать с login.
 
 ```bash
 go test ./internal/user -run Register -v
+go test ./internal/auth -run Bcrypt -v
 ```
 
-### Expected result
+Fake Hasher проверяет сценарий; отдельный bcrypt test подтверждает реальную
+сравнимость hash и соль. DTO ответа никогда не получает PasswordHash.
 
-Тест подтверждает normalized email и то, что plaintext не передан Repository.
+## STEP 3. Login и TokenIssuer
 
-### Связь со следующим шагом
-
-Регистрация создаёт identity, а login должен проверить credentials и выдать
-token.
-
----
-
-## STEP 3. Login и одинаковая внешняя ошибка — 5 минут
-
-### Что открыть
-
-- `internal/user/usecase.go`;
-- `internal/user/errors.go`.
-
-### Что спросить
-
-«Должен ли клиент различать “email не найден” и “password неверный”?»
-
-### Ожидаемый ответ
-
-Нет. Оба случая превращаются в `ErrInvalidCredentials`, чтобы API не помогал
-определять зарегистрированные email.
-
-### Что написать
-
-1. `GetByEmail`.
-2. `hasher.Compare(value.PasswordHash, input.Password)`.
-3. `tokens.Issue(value.ID)`.
-4. `LoginResult{Token: token}`.
-
-### Что временно сломано
-
-Интерфейс `TokenIssuer` уже есть, но concrete TokenManager появится на
-следующем шаге. Unit test использует fake.
-
-### Команда
+Login читает User, вызывает Compare, затем Issue(userID). Неизвестный email
+и неверный password становятся одной ErrInvalidCredentials. user.UseCase
+не импортирует bcrypt или JWT: их implementations придут через constructors.
 
 ```bash
 go test ./internal/user -run Login -v
 ```
 
-### Expected result
+## STEP 4. JWTManager
 
-Правильный password возвращает token; неверный password и отсутствующий user —
-одинаковый `ErrInvalidCredentials`.
-
----
-
-## STEP 4. JWTManager — 6 минут
-
-### Что открыть
-
-- `internal/auth/token.go`;
-- `internal/auth/token_test.go`.
-
-### Что спросить
-
-«Можно ли считать payload JWT секретным?»
-
-### Ожидаемый ответ
-
-Нет. Подпись защищает целостность, но payload можно декодировать. В claims нет
-password или hash.
-
-### Что написать
-
-```go
-type Claims struct {
-    UserID int64 `json:"user_id"`
-    jwt.RegisteredClaims
-}
-```
-
-В `Issue` добавить `user_id`, `iat`, `exp`. В `Verify`:
-
-- разобрать token с claims;
-- разрешить только HS256;
-- потребовать `exp`;
-- проверить `token.Valid` и положительный `UserID`.
-
-### Что специально временно сломать
-
-Уберите `jwt.WithValidMethods`. Спросите: «Почему verifier не должен выбирать
-алгоритм только по непроверенному header?» Верните allow-list.
-
-### Команда
+Покажите auth/token.go: Claims с user_id/iat/exp, Issue и Verify. Verify
+проверяет подпись, обязательный exp, положительный ID и allow-list HS256.
+JWT подписан, но payload не зашифрован. Не объясняйте JWT как замену проверке
+владения конкретной Task.
 
 ```bash
-go test ./internal/auth -v
+go test ./internal/auth -run JWT -v
 ```
 
-### Expected result
+Round trip проходит; expired, wrong signature/algorithm, none и missing exp
+отклоняются. Тестовые часы не требуют Sleep. Ключ берём из окружения.
 
-Round trip возвращает тот же `userID`; expired token отклоняется.
+## STEP 5. Public register/login HTTP
 
----
+Добавьте dto/auth.go, mapper/user.go, handler/auth.go. Handler переводит
+JSON во входы user.UseCase, ошибки — в 400/401/409/500. User DTO публикует
+только id/email. Возвращаем token от login без записи пароля в claims.
 
-## STEP 5. Register/Login HTTP — 5 минут
+## STEP 6. Authentication middleware
 
-### Что открыть
-
-- `internal/httpapi/dto/auth.go`;
-- `internal/httpapi/handler/auth.go`;
-- `internal/httpapi/mapper/user.go`.
-
-### Что спросить
-
-«Почему нельзя encode внутренний `user.User` напрямую?»
-
-### Ожидаемый ответ
-
-Model содержит `PasswordHash`. Response DTO сознательно публикует только ID и
-email.
-
-### Что написать
-
-- request DTO для register/login;
-- response DTO для User/token;
-- mapping application errors в `400`, `401`, `409`, `500`;
-- `Location` перед `writeJSON` при successful register.
-
-### Команда
-
-```bash
-go test ./internal/httpapi/... -run Register -v
-```
-
-Если узкого test ещё нет, достаточно:
-
-```bash
-go test ./internal/httpapi/...
-```
-
-### Expected result
-
-Transport compiles, PasswordHash не входит в response type.
-
----
-
-## STEP 6. Проблема дублирования и AuthMiddleware — 7 минут
-
-### Что открыть
-
-- `internal/httpapi/middleware/auth.go`;
-- `internal/httpapi/middleware/auth_test.go`.
-
-### Сначала показать плохой вариант
-
-Напишите в двух handlers:
-
-```go
-raw := r.Header.Get("Authorization")
-userID, err := tokens.Verify(raw)
-```
-
-Спросите, сколько мест придётся исправлять при изменении формата credentials.
-Удалите дублирование.
-
-### Что написать
-
-```go
-func (m *Auth) RequireUser(next http.Handler) http.Handler
-```
-
-Внутри:
-
-1. прочитать header;
-2. разобрать `Bearer <token>`;
-3. вызвать `TokenVerifier.Verify`;
-4. при ошибке вернуть `401` и `return`;
-5. передать `userID` через context;
-6. вызвать `next.ServeHTTP`.
-
-### Что специально временно сломать
-
-Удалите `return` после `unauthorized(w)`. Спросите, почему next Handler всё
-равно выполнится и почему response станет некорректным. Верните `return`.
-
-### Команда
+В middleware/auth.go определите TokenVerifier и RequireUser. Разберите
+Authorization: Bearer, Verify, 401 + return при ошибке. Не добавляйте загрузку
+Task в middleware: на этом шаге мы только устанавливаем identity.
 
 ```bash
 go test ./internal/httpapi/middleware -v
 ```
 
-### Expected result
+Missing/malformed/invalid credentials дают 401 и не вызывают next.
 
-Missing/wrong/invalid credentials дают `401`; valid token вызывает next.
+## STEP 7. Context и прежние protected routes
 
----
+В authctx/context.go используйте приватный тип ключа. В router.go оставьте
+health/register/login public и оберните **те же** GET/POST/PATCH/DELETE /tasks.
+В handler/task.go добавьте чтение identity и userID в TaskUseCase interface.
+Сохраните Decode/PathValue, DTO/Mapper, error mapping и r.Context().
 
-## STEP 7. Context и protected routes — 5 минут
+Спросите: «Почему userID не поле общего Handler?» Запросы конкурентны,
+identity принадлежит request. UseCase получает userID аргументом и не читает HTTP context.
 
-### Что открыть
+## STEP 8. Task.OwnerID и authorization
 
-- `internal/httpapi/authctx/context.go`;
-- `internal/httpapi/router.go`;
-- `internal/httpapi/handler/note.go`.
+Добавьте OwnerID в существующую Task Model. Создание передаёт ownerID из
+identity в Repository; поле не добавляется в request DTO. List и CountActive
+ограничены owner scope. Get/Update/Delete проверяют value.OwnerID в UseCase.
 
-### Что спросить
-
-«Почему не передать userID через global variable или поле Handler?»
-
-### Ожидаемый ответ
-
-Identity относится к конкретному конкурентному request. Глобальное поле будут
-перезаписывать другие запросы.
-
-### Что написать
-
-```go
-type userIDKey struct{}
-```
-
-Затем `WithUserID` и `UserID`. В Router оставить register/login public, а каждый
-`/notes` Handler обернуть `authMiddleware.RequireUser`.
-
-### Команда
+Сначала покажите valid token Bob: authentication уже пройдена. Затем сравните
+OwnerID Task Alice с userID Bob и верните ErrForbidden. Handler сопоставит 403.
 
 ```bash
-go test ./internal/httpapi/... -v
+go test ./internal/task -v
 ```
 
-### Expected result
+Старые business tests сохраняются с аргументом userID. Новые проверяют owner,
+запрет чужих записей, отдельный лимит и список. Не заменяйте старый PATCH
+полным обновлением: nil и &false остаются различимы.
 
-`GET /notes` без token возвращает `401`. Register/Login остаются доступными.
+## STEP 9. Composition root и интеграция
 
----
-
-## STEP 8. OwnerID и authorization в UseCase — 6 минут
-
-### Что открыть
-
-- `internal/note/model.go`;
-- `internal/note/usecase.go`;
-- `internal/note/usecase_test.go`.
-
-### Что спросить
-
-«Token уже валиден. Может ли Bob теперь удалить Note Alice?»
-
-### Ожидаемый ответ
-
-Authentication завершена, но authorization ещё нужна. UseCase должен сравнить
-`value.OwnerID` и `userID`.
-
-### Что написать
-
-1. `OwnerID` в Note.
-2. `Create(ctx, userID, input)` устанавливает owner из identity, а не из JSON.
-3. `ListByOwner` возвращает только собственные Notes.
-4. Get/Update/Delete загружают Note и возвращают `ErrForbidden` при mismatch.
-
-### Classroom moment
-
-Временно перенесите `OwnerID` в `CreateNoteRequest`. Спросите, сможет ли клиент
-создать Note от имени другого user. Уберите OwnerID из DTO: owner приходит
-только из authentication context.
-
-### Команда
+Расширьте прежний main: User/Task Memory Repository → BcryptHasher/JWTManager
+→ Auth/Task UseCase → handlers → middleware → router. Никаких бизнес-решений
+в main. Подготовьте JWT_SECRET для нового учебного прогона:
 
 ```bash
-go test ./internal/note -v
-```
-
-### Expected result
-
-Owner может менять Note; другой user получает `ErrForbidden`; list изолирован.
-
----
-
-## STEP 9. Error mapping: 401 и 403 — 4 минуты
-
-### Что открыть
-
-- `internal/httpapi/handler/note.go`;
-- `internal/httpapi/middleware/auth.go`.
-
-### Что спросить
-
-Дайте два сценария:
-
-1. header отсутствует;
-2. token valid, Note чужая.
-
-### Ожидаемый ответ
-
-Первый ответ формирует middleware: `401`. Второй error приходит из UseCase и
-Handler переводит его в `403`.
-
-### Что написать
-
-В `writeNoteError`:
-
-```go
-case errors.Is(err, note.ErrForbidden):
-    writeError(w, http.StatusForbidden, err.Error())
-```
-
-UseCase не импортирует `net/http`.
-
-### Команда
-
-```bash
-go test ./internal/httpapi -run Ownership -v
-```
-
-### Expected result
-
-Полный router test видит разные statuses для authentication и authorization.
-
----
-
-## STEP 10. Composition root и полный lifecycle — 6 минут
-
-### Что открыть
-
-- `cmd/api/main.go`;
-- `scripts/curl-demo.sh`.
-
-### Что спросить
-
-«Почему main может знать про memory, bcrypt и JWT?»
-
-### Ожидаемый ответ
-
-`main` — composition root. Он выбирает implementations и связывает их, но не
-содержит business rules.
-
-### Что написать
-
-Создать:
-
-1. UserRepository и NoteRepository;
-2. BcryptHasher и JWTManager;
-3. AuthUseCase и NoteUseCase;
-4. Handlers и AuthMiddleware;
-5. Router и Server.
-
-### Команды
-
-```bash
+export JWT_SECRET="$(openssl rand -hex 32)"
 make ci
 make run
-```
-
-Во втором терминале:
-
-```bash
+# второй терминал:
 make curl-demo
 ```
 
-### Expected result
+Ожидаем register/login, Alice POST/GET Task, Bob GET/PATCH/DELETE → 403,
+Bob list → [], Alice partial PATCH → 200, repeated completion → 409,
+done:false → 200, DELETE → 204, deleted GET → 404. Без token /tasks → 401.
 
-- без token: `401`;
-- Alice создаёт Note: `201`;
-- Bob читает Alice Note: `403`;
-- Bob list: `[]`;
-- Alice update: `200`;
-- Alice delete: `204`;
-- повторный GET: `404`.
+## STEP 10. Возвращаемся к архитектуре 12
 
-## Финальные вопросы — 3 минуты
+Откройте прежние dto/task.go, mapper/task.go, handler/response.go и UseCase.
+Спросите: «Что добавилось? Что осталось?» Ответ: identity/security добавились,
+архитектурные границы, Task, PATCH, business rules и Memory Repository остались.
+Покажите исходный classroom12 и continuity.md, затем тесты прошлого урока с auth fixture.
 
-1. Где заканчивается authentication?
-2. Где начинается ownership authorization?
-3. Что изменится при JWT → opaque token?
-4. Что изменится при memory → PostgreSQL?
-5. Почему `UserResponse` не содержит PasswordHash?
-
-Ожидаемая схема ответа:
-
-```text
-Bearer token → Middleware → userID → request.Context → Handler
-→ UseCase → ownership → Repository
-```
+Финал: «Теперь архитектура и security готовы, но persistence всё ещё временный.
+На следующем занятии заменим Memory Repository на PostgreSQL». Не начинайте
+работу с внешней базой внутри этого урока.

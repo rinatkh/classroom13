@@ -1,43 +1,30 @@
-# Границы учебного auth-примера
+# Security-модель учебного Task API
 
-Проект показывает базовый поток authentication и authorization, но не является
-готовой production-системой управления доступом.
+Задача урока — показать authentication/authorization в архитектуре прошлого
+занятия. Используется access JWT в Authorization: Bearer, без refresh tokens,
+сессий и отдельного механизма отзыва. Конечный TTL ограничивает время действия;
+наличие exp само по себе не делает возможным немедленный logout/revocation.
 
-## Что сделано корректно для учебной цели
+## Что проверяется
 
-- пароль сохраняется только как bcrypt hash;
-- login не сообщает, отсутствует пользователь или неверен password;
-- JWT signature и `exp` проверяются;
-- допустим только алгоритм HS256;
-- payload содержит только `user_id` и стандартные временные claims;
-- JWT secret поступает из environment;
-- protected endpoints требуют Bearer token;
-- ownership проверяется в UseCase;
-- внутренние errors не возвращаются клиенту целиком.
+- Register сохраняет bcrypt hash; пароль и hash не входят в response DTO/claims.
+- Password сохраняет пробелы, допустимая длина входа 8–72 байта.
+- JWT Verify требует подпись HS256, exp, подходящий срок и положительный user_id.
+- Middleware передаёт только проверенную identity в request.Context.
+- TaskUseCase проверяет владение конкретной Task; списки и лимиты изолированы.
+- Body ограничен 1 MiB, неизвестные JSON поля отклоняются.
 
-## Что нужно решить в production
+JWT_SECRET не хранится в коде и не выводится в logs; сервер требует минимум
+32 байта. Для нового прогона с пустыми memory-данными сгенерируйте свежий ключ
+и повторите register/login. Иначе старый JWT может пережить сброс временных ID.
 
-- политика сложности и утечки паролей;
-- rate limiting и защита login от перебора;
-- безопасное хранение и регулярная смена secrets;
-- refresh tokens, logout и отзыв сессий;
-- HTTPS на внешней границе;
-- аудит security events;
-- выбор между cookies и Authorization header под конкретный клиент;
-- скрывать ли существование чужого ресурса через `404` вместо `403`;
-- роли и более сложные правила доступа;
-- общая модель authentication для нескольких сервисов.
+## Зависимости и чтение
 
-Эти вопросы намеренно не реализуются на занятии. OAuth2, OpenID Connect,
-Keycloak, SSO и distributed auth требуют отдельного материала.
+JWT dependency обновлена с 5.2.1 до 5.2.2 без смены API. Это исправленная ветка
+для [advisory проекта golang-jwt](https://github.com/golang-jwt/jwt/security/advisories/GHSA-mh63-6h87-95cp).
+Allow-list алгоритмов описан в [документации JWT](https://golang-jwt.github.io/jwt/usage/parse/).
+Ограничение bcrypt и API Compare описаны в [документации Go](https://pkg.go.dev/golang.org/x/crypto/bcrypt).
 
-## JWT payload не зашифрован
-
-Обычный signed JWT защищает целостность, но payload можно декодировать без
-secret. Нельзя помещать туда password, password hash, токены других систем или
-данные, раскрытие которых недопустимо.
-
-## Bearer — модель владения
-
-Сервер разрешает запрос тому, кто предъявил token. Поэтому token нельзя писать
-в публичные логи, URL query parameters или сообщения об ошибках.
+В учебных curl/test сценариях только localhost и тестовые credentials.
+При будущем внешнем развёртывании TLS и управление жизненным циклом identity
+будут отдельной задачей. Это не требуется для рефакторинга хранения в уроке 14.
