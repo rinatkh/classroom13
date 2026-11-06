@@ -1,8 +1,9 @@
-package task
+package repository
 
 import (
 	"context"
 	"errors"
+	"github.com/rinatkh/classroom13/internal/task"
 	"sync"
 	"testing"
 
@@ -12,14 +13,14 @@ import (
 // Проверяем business invariant через один UseCase, как в composition root.
 func TestUseCaseConcurrentCreateRespectsActiveLimit(t *testing.T) {
 	repo := memory.NewTaskRepository()
-	uc := NewUseCase(repo)
+	uc := task.NewUseCase(repo)
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := uc.Create(context.Background(), 1, CreateInput{Title: "task"})
-			if err != nil && !errors.Is(err, ErrActiveLimit) {
+			_, err := uc.Create(context.Background(), 1, task.CreateInput{Title: "task"})
+			if err != nil && !errors.Is(err, task.ErrActiveLimit) {
 				t.Errorf("create: %v", err)
 			}
 		}()
@@ -32,17 +33,17 @@ func TestUseCaseConcurrentCreateRespectsActiveLimit(t *testing.T) {
 }
 
 func TestActiveLimitIsPerOwner(t *testing.T) {
-	uc := NewUseCase(memory.NewTaskRepository())
+	uc := task.NewUseCase(memory.NewTaskRepository())
 	ctx := context.Background()
 	for i := 0; i < 20; i++ {
-		if _, err := uc.Create(ctx, 1, CreateInput{Title: "Alice"}); err != nil {
+		if _, err := uc.Create(ctx, 1, task.CreateInput{Title: "Alice"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := uc.Create(ctx, 1, CreateInput{Title: "over limit"}); !errors.Is(err, ErrActiveLimit) {
+	if _, err := uc.Create(ctx, 1, task.CreateInput{Title: "over limit"}); !errors.Is(err, task.ErrActiveLimit) {
 		t.Fatalf("Alice limit=%v", err)
 	}
-	bob, err := uc.Create(ctx, 2, CreateInput{Title: "Bob"})
+	bob, err := uc.Create(ctx, 2, task.CreateInput{Title: "Bob"})
 	if err != nil || bob.OwnerID != 2 {
 		t.Fatalf("Bob should have his own limit: %+v, %v", bob, err)
 	}
